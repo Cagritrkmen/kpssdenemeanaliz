@@ -10,6 +10,7 @@ const DERSLER = [
   "Güncel Bilgiler",
 ];
 const STORAGE_KEY = "kpssDenemeAnaliz";
+const DEFAULT_BRANCH_FOLDER = "Tum Denemeler";
 
 const yanlisGötürüDefault = 4;
 
@@ -33,16 +34,73 @@ function bosGenelDeneme(id) {
   };
 }
 
-function bosBransDeneme(id, ders) {
+function bosBransDeneme(id, ders, folderName) {
   return {
     id,
-    ad: `${ders} Deneme ${id}`,
+    ad: `${folderName} Deneme ${id}`,
     date: new Date().toISOString().slice(0, 10),
     dogru: "",
     yanlis: "",
     bos: "",
     net: 0,
   };
+}
+
+function createEmptyBransFolders() {
+  const empty = {};
+  DERSLER.forEach((d) => {
+    empty[d] = { [DEFAULT_BRANCH_FOLDER]: [] };
+  });
+  return empty;
+}
+
+function createDefaultActiveFolders() {
+  const active = {};
+  DERSLER.forEach((d) => {
+    active[d] = DEFAULT_BRANCH_FOLDER;
+  });
+  return active;
+}
+
+function normalizeBransFolders(rawBransDenemeler) {
+  const normalized = {};
+  DERSLER.forEach((ders) => {
+    const raw = rawBransDenemeler?.[ders];
+    if (Array.isArray(raw)) {
+      // Eski format migration: ders -> deneme[]
+      normalized[ders] = { [DEFAULT_BRANCH_FOLDER]: raw };
+      return;
+    }
+    if (raw && typeof raw === "object") {
+      const folderEntries = Object.entries(raw).filter(([, v]) =>
+        Array.isArray(v),
+      );
+      if (folderEntries.length > 0) {
+        normalized[ders] = {};
+        folderEntries.forEach(([folderName, list]) => {
+          normalized[ders][folderName] = list;
+        });
+        return;
+      }
+    }
+    normalized[ders] = { [DEFAULT_BRANCH_FOLDER]: [] };
+  });
+  return normalized;
+}
+
+function getVisibleBransDenemeler(folderMap, aktifFolder) {
+  if (!folderMap) return [];
+  if (aktifFolder !== DEFAULT_BRANCH_FOLDER) {
+    return folderMap[aktifFolder] || [];
+  }
+
+  return Object.entries(folderMap).flatMap(([folderName, list]) =>
+    (list || []).map((deneme) => ({
+      ...deneme,
+      __sourceFolder: folderName,
+      __rowKey: `${folderName}-${deneme.id}`,
+    })),
+  );
 }
 
 function App() {
@@ -68,33 +126,42 @@ function App() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) {
-        const empty = {};
-        DERSLER.forEach((d) => {
-          empty[d] = [];
-        });
-        return empty;
+        return createEmptyBransFolders();
       }
       const parsed = JSON.parse(raw);
-      if (parsed?.bransDenemeler && typeof parsed.bransDenemeler === "object") {
-        const base = {};
-        DERSLER.forEach((d) => {
-          base[d] = Array.isArray(parsed.bransDenemeler[d])
-            ? parsed.bransDenemeler[d]
-            : [];
-        });
-        return base;
+      if (
+        parsed?.bransDenemeler &&
+        typeof parsed.bransDenemeler === "object"
+      ) {
+        return normalizeBransFolders(parsed.bransDenemeler);
       }
-      const empty = {};
-      DERSLER.forEach((d) => {
-        empty[d] = [];
-      });
-      return empty;
+      return createEmptyBransFolders();
     } catch {
-      const empty = {};
-      DERSLER.forEach((d) => {
-        empty[d] = [];
-      });
-      return empty;
+      return createEmptyBransFolders();
+    }
+  });
+  const [aktifBransKlasorleri, setAktifBransKlasorleri] = useState(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (!raw) {
+        return createDefaultActiveFolders();
+      }
+      const parsed = JSON.parse(raw);
+      const defaults = createDefaultActiveFolders();
+      if (
+        parsed?.aktifBransKlasorleri &&
+        typeof parsed.aktifBransKlasorleri === "object"
+      ) {
+        DERSLER.forEach((ders) => {
+          const value = parsed.aktifBransKlasorleri[ders];
+          if (typeof value === "string" && value.trim()) {
+            defaults[ders] = value;
+          }
+        });
+      }
+      return defaults;
+    } catch {
+      return createDefaultActiveFolders();
     }
   });
   const [aktifSekme, setAktifSekme] = useState("Genel");
@@ -102,7 +169,7 @@ function App() {
   const [importOk, setImportOk] = useState(false);
 
   const handleExport = () => {
-    const payload = { genelDenemeler, bransDenemeler };
+    const payload = { genelDenemeler, bransDenemeler, aktifBransKlasorleri };
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: "application/json",
     });
@@ -131,14 +198,23 @@ function App() {
         ) {
           throw new Error("Geçersiz JSON yapısı");
         }
-        const safeBrans = {};
-        DERSLER.forEach((d) => {
-          safeBrans[d] = Array.isArray(parsed.bransDenemeler?.[d])
-            ? parsed.bransDenemeler[d]
-            : [];
+        const safeBrans = normalizeBransFolders(parsed.bransDenemeler);
+        const safeActive = createDefaultActiveFolders();
+        DERSLER.forEach((ders) => {
+          const folderNames = Object.keys(safeBrans[ders] || {});
+          const requested = parsed?.aktifBransKlasorleri?.[ders];
+          if (
+            typeof requested === "string" &&
+            folderNames.includes(requested)
+          ) {
+            safeActive[ders] = requested;
+          } else if (folderNames.length > 0) {
+            safeActive[ders] = folderNames[0];
+          }
         });
         setGenelDenemeler(parsed.genelDenemeler);
         setBransDenemeler(safeBrans);
+        setAktifBransKlasorleri(safeActive);
         setImportOk(true);
       } catch (err) {
         console.error("IMPORT ERROR", err);
@@ -150,14 +226,14 @@ function App() {
 
   // localStorage'a yaz
   useEffect(() => {
-    const payload = { genelDenemeler, bransDenemeler };
+    const payload = { genelDenemeler, bransDenemeler, aktifBransKlasorleri };
     try {
       console.log("SAVE to LS:", payload);
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch (err) {
       console.error("SAVE ERROR", err);
     }
-  }, [genelDenemeler, bransDenemeler]);
+  }, [genelDenemeler, bransDenemeler, aktifBransKlasorleri]);
 
   const handleAddDeneme = () => {
     if (aktifSekme === "Genel") {
@@ -169,22 +245,36 @@ function App() {
     }
 
     setBransDenemeler((prev) => {
-      const list = prev[aktifSekme] || [];
+      const aktifKlasor =
+        aktifBransKlasorleri[aktifSekme] || DEFAULT_BRANCH_FOLDER;
+      const folderMap = prev[aktifSekme] || { [DEFAULT_BRANCH_FOLDER]: [] };
+      const list = folderMap[aktifKlasor] || [];
       const nextId = (list.at(-1)?.id || 0) + 1;
       return {
         ...prev,
-        [aktifSekme]: [...list, bosBransDeneme(nextId, aktifSekme)],
+        [aktifSekme]: {
+          ...folderMap,
+          [aktifKlasor]: [...list, bosBransDeneme(nextId, aktifSekme, aktifKlasor)],
+        },
       };
     });
   };
 
-  const handleDeleteDeneme = (id) => {
+  const handleDeleteDeneme = (id, sourceFolder) => {
     if (aktifSekme === "Genel") {
       setGenelDenemeler((prev) => prev.filter((d) => d.id !== id));
     } else {
+      const aktifKlasor =
+        aktifBransKlasorleri[aktifSekme] || DEFAULT_BRANCH_FOLDER;
+      const targetFolder = sourceFolder || aktifKlasor;
       setBransDenemeler((prev) => ({
         ...prev,
-        [aktifSekme]: (prev[aktifSekme] || []).filter((d) => d.id !== id),
+        [aktifSekme]: {
+          ...(prev[aktifSekme] || { [DEFAULT_BRANCH_FOLDER]: [] }),
+          [targetFolder]: (prev[aktifSekme]?.[targetFolder] || []).filter(
+            (d) => d.id !== id,
+          ),
+        },
       }));
     }
   };
@@ -222,9 +312,12 @@ function App() {
     );
   };
 
-  const handleChangeBransSonuc = (denemeId, ders, alan, value) => {
+  const handleChangeBransSonuc = (denemeId, ders, alan, value, sourceFolder) => {
     setBransDenemeler((prev) => {
-      const list = prev[ders] || [];
+      const aktifKlasor = aktifBransKlasorleri[ders] || DEFAULT_BRANCH_FOLDER;
+      const targetFolder = sourceFolder || aktifKlasor;
+      const folderMap = prev[ders] || { [DEFAULT_BRANCH_FOLDER]: [] };
+      const list = folderMap[targetFolder] || [];
       const updated = list.map((d) => {
         if (d.id !== denemeId) return d;
         const nextField = {
@@ -240,7 +333,101 @@ function App() {
       });
       return {
         ...prev,
-        [ders]: updated,
+        [ders]: {
+          ...folderMap,
+          [targetFolder]: updated,
+        },
+      };
+    });
+  };
+
+  const handleAddFolder = (ders, folderNameInput) => {
+    const folderName = folderNameInput?.trim();
+    if (!folderName) return;
+
+    setBransDenemeler((prev) => {
+      const current = prev[ders] || { [DEFAULT_BRANCH_FOLDER]: [] };
+      if (current[folderName]) {
+        return prev;
+      }
+      return {
+        ...prev,
+        [ders]: {
+          ...current,
+          [folderName]: [],
+        },
+      };
+    });
+
+    setAktifBransKlasorleri((prev) => ({
+      ...prev,
+      [ders]: folderName,
+    }));
+  };
+
+  const handleSelectFolder = (ders, folderName) => {
+    setAktifBransKlasorleri((prev) => ({
+      ...prev,
+      [ders]: folderName,
+    }));
+  };
+
+  const handleRenameFolder = (ders, folderName, nextNameInput) => {
+    if (folderName === DEFAULT_BRANCH_FOLDER) return;
+    const nextName = nextNameInput?.trim();
+    if (!nextName || nextName === folderName) return;
+
+    setBransDenemeler((prev) => {
+      const current = prev[ders] || { [DEFAULT_BRANCH_FOLDER]: [] };
+      if (!current[folderName] || current[nextName]) return prev;
+
+      const renamed = {};
+      Object.keys(current).forEach((key) => {
+        if (key === folderName) {
+          renamed[nextName] = current[key];
+        } else {
+          renamed[key] = current[key];
+        }
+      });
+
+      return {
+        ...prev,
+        [ders]: renamed,
+      };
+    });
+
+    setAktifBransKlasorleri((prev) => ({
+      ...prev,
+      [ders]: prev[ders] === folderName ? nextName : prev[ders],
+    }));
+  };
+
+  const handleDeleteFolder = (ders, folderName) => {
+    if (folderName === DEFAULT_BRANCH_FOLDER) return;
+    setBransDenemeler((prev) => {
+      const current = prev[ders] || { [DEFAULT_BRANCH_FOLDER]: [] };
+      const names = Object.keys(current);
+      if (!current[folderName] || names.length <= 1) {
+        return prev;
+      }
+      if (!window.confirm(`"${folderName}" klasorunu silmek istiyor musun?`)) {
+        return prev;
+      }
+
+      const nextFolders = { ...current };
+      delete nextFolders[folderName];
+
+      setAktifBransKlasorleri((activePrev) => {
+        if (activePrev[ders] !== folderName) return activePrev;
+        return {
+          ...activePrev,
+          [ders]: Object.keys(nextFolders)[0] || DEFAULT_BRANCH_FOLDER,
+        };
+      });
+
+      return {
+        ...prev,
+        [ders]: nextFolders,
       };
     });
   };
@@ -276,7 +463,8 @@ function App() {
   const bransOrtalamalar = useMemo(() => {
     const byDers = {};
     DERSLER.forEach((ders) => {
-      const list = bransDenemeler[ders] || [];
+      const aktifKlasor = aktifBransKlasorleri[ders] || DEFAULT_BRANCH_FOLDER;
+      const list = getVisibleBransDenemeler(bransDenemeler[ders], aktifKlasor);
       if (!list.length) {
         byDers[ders] = 0;
         return;
@@ -288,7 +476,15 @@ function App() {
       byDers[ders] = Number((toplam / list.length).toFixed(2));
     });
     return byDers;
-  }, [bransDenemeler]);
+  }, [bransDenemeler, aktifBransKlasorleri]);
+
+  const aktifBransDenemeler =
+    aktifSekme === "Genel"
+      ? []
+      : getVisibleBransDenemeler(
+          bransDenemeler[aktifSekme],
+          aktifBransKlasorleri[aktifSekme] || DEFAULT_BRANCH_FOLDER,
+        );
 
   return (
     <div className="app-root">
@@ -315,7 +511,7 @@ function App() {
             ) : (
               <>
                 {aktifSekme} deneme sayısı:{" "}
-                <strong>{bransDenemeler[aktifSekme]?.length ?? 0}</strong>
+                <strong>{aktifBransDenemeler.length}</strong>
               </>
             )}
           </span>
@@ -374,7 +570,14 @@ function App() {
       ) : (
         <DersTab
           ders={aktifSekme}
-          denemeler={bransDenemeler[aktifSekme] || []}
+          denemeler={aktifBransDenemeler}
+          folderMap={bransDenemeler[aktifSekme] || {}}
+          folderNames={Object.keys(bransDenemeler[aktifSekme] || {})}
+          aktifFolder={aktifBransKlasorleri[aktifSekme] || DEFAULT_BRANCH_FOLDER}
+          onSelectFolder={handleSelectFolder}
+          onAddFolder={handleAddFolder}
+          onRenameFolder={handleRenameFolder}
+          onDeleteFolder={handleDeleteFolder}
           ortalamalar={bransOrtalamalar}
           onChangeSonuc={handleChangeBransSonuc}
           onDeleteDeneme={handleDeleteDeneme}
@@ -684,11 +887,74 @@ function onChangeDenemeMeta() {
   // istersen sonra tarih / ad düzenleme logic ekleriz.
 }
 
-function DersTab({ ders, denemeler, ortalamalar, onChangeSonuc, onDeleteDeneme }) {
+function DersTab({
+  ders,
+  denemeler,
+  folderMap,
+  folderNames,
+  aktifFolder,
+  onSelectFolder,
+  onAddFolder,
+  onRenameFolder,
+  onDeleteFolder,
+  ortalamalar,
+  onChangeSonuc,
+  onDeleteDeneme,
+}) {
+  const [newFolderName, setNewFolderName] = useState("");
+  const [renameTarget, setRenameTarget] = useState("");
+  const [renameValue, setRenameValue] = useState("");
+
+  const startRename = (folderName) => {
+    setRenameTarget(folderName);
+    setRenameValue(folderName);
+  };
+
+  const submitRename = () => {
+    if (!renameTarget) return;
+    onRenameFolder(ders, renameTarget, renameValue);
+    setRenameTarget("");
+    setRenameValue("");
+  };
+
+  const submitAddFolder = () => {
+    onAddFolder(ders, newFolderName);
+    setNewFolderName("");
+  };
+
   const chartData = denemeler.map((d, idx) => ({
     x: idx + 1,
     y: Number(d.net || 0),
   }));
+
+  const folderStats = folderNames.map((folderName) => {
+    const list =
+      folderName === DEFAULT_BRANCH_FOLDER
+        ? getVisibleBransDenemeler(folderMap, DEFAULT_BRANCH_FOLDER)
+        : folderMap?.[folderName] || [];
+    const denemeSayisi = list.length;
+    const ortNet = denemeSayisi
+      ? Number(
+          (
+            list.reduce((sum, item) => sum + (Number(item.net) || 0), 0) /
+            denemeSayisi
+          ).toFixed(2),
+        )
+      : 0;
+    const sonTarih = denemeSayisi
+      ? list.reduce((maxDate, item) => {
+          const date = item.date || "";
+          return date > maxDate ? date : maxDate;
+        }, "")
+      : "-";
+
+    return {
+      folderName,
+      denemeSayisi,
+      ortNet,
+      sonTarih: sonTarih || "-",
+    };
+  });
 
   const maxY =
     chartData.length > 0 ? Math.max(...chartData.map((p) => p.y), 0) : 0;
@@ -730,6 +996,107 @@ function DersTab({ ders, denemeler, ortalamalar, onChangeSonuc, onDeleteDeneme }
           Ortalama net: <strong>{ortalamalar[ders] ?? 0}</strong>
         </div>
       </div>
+
+      <section className="folder-card">
+        <div className="folder-card-header">
+          <h3>Yayinevi Klasorleri</h3>
+          <span>{folderNames.length} klasor</span>
+        </div>
+
+        <div className="folder-dashboard">
+          {folderStats.map((stat) => (
+            <button
+              key={`dash-${stat.folderName}`}
+              className={`folder-dash-card ${aktifFolder === stat.folderName ? "active" : ""}`}
+              onClick={() => onSelectFolder(ders, stat.folderName)}
+            >
+              <div className="folder-dash-title">{stat.folderName}</div>
+              <div className="folder-dash-meta">
+                <span>{stat.denemeSayisi} deneme</span>
+                <span>Ort: {stat.ortNet}</span>
+              </div>
+              <div className="folder-dash-date">Son: {stat.sonTarih}</div>
+            </button>
+          ))}
+        </div>
+
+        <div className="folder-row">
+          {folderNames.map((folderName) => (
+            <div key={folderName} className="folder-item">
+              {renameTarget === folderName ? (
+                <>
+                  <input
+                    className="folder-input"
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") submitRename();
+                      if (e.key === "Escape") {
+                        setRenameTarget("");
+                        setRenameValue("");
+                      }
+                    }}
+                    autoFocus
+                  />
+                  <button className="folder-mini-btn save" onClick={submitRename}>
+                    Kaydet
+                  </button>
+                  <button
+                    className="folder-mini-btn"
+                    onClick={() => {
+                      setRenameTarget("");
+                      setRenameValue("");
+                    }}
+                  >
+                    Vazgec
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className={`folder-btn ${aktifFolder === folderName ? "active" : ""}`}
+                    onClick={() => onSelectFolder(ders, folderName)}
+                  >
+                    {folderName}
+                  </button>
+                {folderName !== DEFAULT_BRANCH_FOLDER && (
+                  <>
+                    <button
+                      className="folder-mini-btn"
+                      title="Yeniden adlandir"
+                      onClick={() => startRename(folderName)}
+                    >
+                      Duzenle
+                    </button>
+                    <button
+                      className="folder-mini-btn danger"
+                      title="Klasoru sil"
+                      onClick={() => onDeleteFolder(ders, folderName)}
+                    >
+                      Sil
+                    </button>
+                  </>
+                )}
+                </>
+              )}
+            </div>
+          ))}
+          <div className="folder-create">
+            <input
+              className="folder-input"
+              placeholder="Yeni klasor adi"
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitAddFolder();
+              }}
+            />
+            <button className="folder-mini-btn save" onClick={submitAddFolder}>
+              Ekle
+            </button>
+          </div>
+        </div>
+      </section>
 
       {chartData.length > 0 && (
         <div className="chart-wrapper">
@@ -866,15 +1233,25 @@ function DersTab({ ders, denemeler, ortalamalar, onChangeSonuc, onDeleteDeneme }
               </tr>
             )}
             {denemeler.map((d) => (
-              <tr key={d.id}>
-                <td className="sticky-col">{d.ad}</td>
+              <tr key={d.__rowKey || d.id}>
+                <td className="sticky-col">
+                  {d.__sourceFolder
+                    ? `${d.__sourceFolder} Deneme ${d.id}`
+                    : `${aktifFolder} Deneme ${d.id}`}
+                </td>
                 <td>{d.date}</td>
                 <td>
                   <input
                     type="text"
                     value={d.dogru ?? ""}
                     onChange={(e) =>
-                      onChangeSonuc(d.id, ders, "dogru", e.target.value)
+                      onChangeSonuc(
+                        d.id,
+                        ders,
+                        "dogru",
+                        e.target.value,
+                        d.__sourceFolder,
+                      )
                     }
                     inputMode="numeric"
                   />
@@ -884,7 +1261,13 @@ function DersTab({ ders, denemeler, ortalamalar, onChangeSonuc, onDeleteDeneme }
                     type="text"
                     value={d.yanlis ?? ""}
                     onChange={(e) =>
-                      onChangeSonuc(d.id, ders, "yanlis", e.target.value)
+                      onChangeSonuc(
+                        d.id,
+                        ders,
+                        "yanlis",
+                        e.target.value,
+                        d.__sourceFolder,
+                      )
                     }
                     inputMode="numeric"
                   />
@@ -894,7 +1277,13 @@ function DersTab({ ders, denemeler, ortalamalar, onChangeSonuc, onDeleteDeneme }
                     type="text"
                     value={d.bos ?? ""}
                     onChange={(e) =>
-                      onChangeSonuc(d.id, ders, "bos", e.target.value)
+                      onChangeSonuc(
+                        d.id,
+                        ders,
+                        "bos",
+                        e.target.value,
+                        d.__sourceFolder,
+                      )
                     }
                     inputMode="numeric"
                   />
@@ -905,7 +1294,7 @@ function DersTab({ ders, denemeler, ortalamalar, onChangeSonuc, onDeleteDeneme }
                 <td>
                   <button
                     className="ghost-btn danger"
-                    onClick={() => onDeleteDeneme(d.id)}
+                    onClick={() => onDeleteDeneme(d.id, d.__sourceFolder)}
                   >
                     Sil
                   </button>
